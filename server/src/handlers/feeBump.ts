@@ -1,15 +1,19 @@
 import { Request, Response, NextFunction } from "express";
 import StellarSdk from "@stellar/stellar-sdk";
-import { Config } from "../config";
 import { transactionStore } from "../workers/transactionStore";
 import { AppError } from "../errors/AppError";
 
-import { FeeBumpSchema, FeeBumpRequest } from "../schemas/feeBump";
+interface FeeBumpRequest {
+  xdr: string;
+  submit?: boolean;
+  token?: string;
+}
 
 interface FeeBumpResponse {
   xdr: string;
   status: string;
   hash?: string;
+  fee_payer: string;
 }
 
 export function feeBumpHandler(
@@ -33,11 +37,17 @@ export function feeBumpHandler(
           "INVALID_XDR"
         )
       );
+      
+      const body: FeeBumpRequest = req.body;
+      if (!body.xdr) {
+        res.status(400).json({ error: "Missing 'xdr' field in request body" });
+        return;
+      }
     }
 
-    const body: FeeBumpRequest = result.data;
-
-    console.log("Received fee-bump request");
+    // Pick a fee payer account using Round Robin
+    const feePayerAccount = pickFeePayerAccount(config);
+    console.log(`Received fee-bump request | fee_payer: ${feePayerAccount.publicKey}`);
 
     let innerTransaction: any;
     try {
@@ -52,7 +62,6 @@ export function feeBumpHandler(
       );
     }
 
-    // Verify inner transaction is signed
     if (innerTransaction.signatures.length === 0) {
       return next(
         new AppError(
@@ -80,17 +89,15 @@ export function feeBumpHandler(
     );
 
     const feeBumpTx = StellarSdk.TransactionBuilder.buildFeeBumpTransaction(
-      feePayerKeypair,
+      feePayerAccount.keypair,
       feeAmount,
       innerTransaction,
       config.networkPassphrase,
     );
-
-    feeBumpTx.sign(feePayerKeypair);
+    feeBumpTx.sign(feePayerAccount.keypair);
 
     const feeBumpXdr = feeBumpTx.toXDR();
-
-    console.log("Fee-bump transaction created successfully");
+    console.log(`Fee-bump transaction created | fee_payer: ${feePayerAccount.publicKey}`);
 
     const submit = body.submit || false;
     const status = submit ? "submitted" : "ready";
@@ -107,6 +114,7 @@ export function feeBumpHandler(
             xdr: feeBumpXdr,
             status: "submitted",
             hash: result.hash,
+            fee_payer: feePayerAccount.publicKey,
           };
           res.json(response);
         })
@@ -124,6 +132,7 @@ export function feeBumpHandler(
       const response: FeeBumpResponse = {
         xdr: feeBumpXdr,
         status,
+        fee_payer: feePayerAccount.publicKey,
       };
       res.json(response);
     }
