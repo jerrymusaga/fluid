@@ -59,11 +59,15 @@ Optional:
 - `FLUID_LOW_BALANCE_THRESHOLD_XLM` - Backward-compatible low balance threshold env var
 - `LOW_BALANCE_ALERT_CHECK_INTERVAL_MS` / `FLUID_LOW_BALANCE_CHECK_INTERVAL_MS` - Balance polling interval (default: 300000 / 5 minutes)
 - `LOW_BALANCE_ALERT_COOLDOWN_MS` / `FLUID_LOW_BALANCE_ALERT_COOLDOWN_MS` - Minimum time between repeated alerts per account (minimum enforced: 3600000 / 1 hour)
+- `PAGERDUTY_ROUTING_KEY` - PagerDuty Events API v2 routing key for P1 incident alerts
+- `PAGERDUTY_SERVICE_NAME` - Service name shown in PagerDuty payloads (default: `Fluid server`)
+- `PAGERDUTY_SOURCE` - PagerDuty payload source (default: `fluid-server`)
+- `PAGERDUTY_COMPONENT` - PagerDuty component tag (default: `fee-sponsorship`)
 - `SLACK_WEBHOOK_URL` - Slack incoming webhook URL used for critical ops alerts
 - `SLACK_ALERT_LOW_BALANCE_ENABLED` - Enable or disable low balance Slack alerts (default: `true`)
 - `SLACK_ALERT_5XX_ENABLED` - Enable or disable 5xx error Slack alerts (default: `true`)
 - `SLACK_ALERT_SERVER_LIFECYCLE_ENABLED` - Enable or disable server start/stop Slack alerts (default: `true`)
-- `SLACK_ALERT_FAILED_TRANSACTION_ENABLED` - Enable or disable failed transaction Slack alerts (default: `true`)
+- `SLACK_ALERT_FAILED_TRANSACTION_ENABLED` - Enable or disable failed transaction alerts (default: `true`)
 - `FLUID_ALERT_SLACK_WEBHOOK_URL` - Backward-compatible alias for `SLACK_WEBHOOK_URL`
 - `FLUID_ALERT_SMTP_HOST` / `FLUID_ALERT_SMTP_PORT` / `FLUID_ALERT_SMTP_SECURE` - SMTP connection settings
 - `FLUID_ALERT_SMTP_USER` / `FLUID_ALERT_SMTP_PASS` - Optional SMTP auth
@@ -98,6 +102,16 @@ Response:
 Sends a manual low-balance alert through the configured Slack webhook and/or email transport. This is useful for capturing the required review screenshot without draining a real account first.
 
 Low-balance emails support SMTP and Resend transport configuration. Each fee-payer account is debounced to at most one alert per hour, and the message includes the fee payer public key, current balance, threshold, and a dashboard link when `FLUID_ALERT_DASHBOARD_URL` is configured.
+
+## PagerDuty Incidents
+
+PagerDuty incidents are created via the Events API v2 when `PAGERDUTY_ROUTING_KEY` is configured. Fluid triggers and resolves incidents for:
+
+- zero usable signing accounts
+- Horizon unreachable for more than 60 seconds
+- server restart (auto-resolved after recovery)
+
+Each incident type uses a stable `dedup_key` so repeated triggers are collapsed into the same incident.
 
 ## Webhook Signing
 
