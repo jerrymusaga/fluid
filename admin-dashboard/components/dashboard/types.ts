@@ -1,3 +1,9 @@
+export type DashboardSignerStatus =
+  | "Active"
+  | "Low Balance"
+  | "Sequence Error"
+  | "Inactive";
+
 export interface DashboardTransaction {
   id: string;
   hash: string;
@@ -12,7 +18,7 @@ export interface DashboardTransaction {
 export interface DashboardSigner {
   id: string;
   publicKey: string;
-  status: "active" | "inactive";
+  status: DashboardSignerStatus;
   balance: string;
   inFlight: number;
   totalUses: number;
@@ -28,6 +34,34 @@ export interface TransactionHistoryRow {
   status: TransactionStatus;
   costStroops: number;
   tenant: string;
+}
+
+export interface TenantUsageRow {
+  tenant: string;
+  txCount: number;
+  totalCostStroops: number;
+  successCount: number;
+  failedCount: number;
+}
+
+export interface ApiKey {
+  id: string;
+  key: string;
+  prefix: string;
+  tenantId: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type WebhookEventType = "tx.success" | "tx.failed" | "balance.low";
+
+export interface WebhookTenantSettings {
+  tenantId: string;
+  tenantName: string | null;
+  webhookUrl: string | null;
+  eventTypes: WebhookEventType[];
+  updatedAt: string | null;
 }
 
 export type TransactionHistorySort =

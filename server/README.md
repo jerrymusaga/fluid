@@ -62,7 +62,12 @@ Optional:
 - `PAGERDUTY_SERVICE_NAME` - Service name shown in PagerDuty payloads (default: `Fluid server`)
 - `PAGERDUTY_SOURCE` - PagerDuty payload source (default: `fluid-server`)
 - `PAGERDUTY_COMPONENT` - PagerDuty component tag (default: `fee-sponsorship`)
-- `FLUID_ALERT_SLACK_WEBHOOK_URL` - Slack incoming webhook URL
+- `SLACK_WEBHOOK_URL` - Slack incoming webhook URL used for critical ops alerts
+- `SLACK_ALERT_LOW_BALANCE_ENABLED` - Enable or disable low balance Slack alerts (default: `true`)
+- `SLACK_ALERT_5XX_ENABLED` - Enable or disable 5xx error Slack alerts (default: `true`)
+- `SLACK_ALERT_SERVER_LIFECYCLE_ENABLED` - Enable or disable server start/stop Slack alerts (default: `true`)
+- `SLACK_ALERT_FAILED_TRANSACTION_ENABLED` - Enable or disable failed transaction alerts (default: `true`)
+- `FLUID_ALERT_SLACK_WEBHOOK_URL` - Backward-compatible alias for `SLACK_WEBHOOK_URL`
 - `FLUID_ALERT_SMTP_HOST` / `FLUID_ALERT_SMTP_PORT` / `FLUID_ALERT_SMTP_SECURE` - SMTP connection settings
 - `FLUID_ALERT_SMTP_USER` / `FLUID_ALERT_SMTP_PASS` - Optional SMTP auth
 - `FLUID_ALERT_EMAIL_FROM` / `FLUID_ALERT_EMAIL_TO` - Email sender and comma-separated recipients
@@ -102,6 +107,89 @@ PagerDuty incidents are created via the Events API v2 when `PAGERDUTY_ROUTING_KE
 - server restart (auto-resolved after recovery)
 
 Each incident type uses a stable `dedup_key` so repeated triggers are collapsed into the same incident.
+
+## Webhook Signing
+
+Outbound tenant webhooks are signed with `HMAC-SHA256` using the tenant-specific `webhookSecret` stored in the database. Every signed delivery includes:
+
+- `Content-Type: application/json`
+- `X-Fluid-Signature-256: sha256=<hex digest>`
+
+Tenants configure webhook delivery with `PATCH /tenant/webhook`:
+
+```json
+{
+  "webhookUrl": "https://example.com/fluid/webhooks",
+  "webhookSecret": "replace-with-a-long-random-secret"
+}
+```
+
+The API never returns the raw secret. It only returns whether a secret is configured.
+
+If a tenant has a webhook URL but no `webhookSecret`, Fluid logs the misconfiguration and refuses to send an unsigned webhook.
+
+### Verify in Node.js
+
+```js
+import crypto from "node:crypto";
+
+function verifyFluidWebhook(rawBody, signatureHeader, secret) {
+  const expected = `sha256=${crypto
+    .createHmac("sha256", secret)
+    .update(rawBody)
+    .digest("hex")}`;
+
+  const actual = signatureHeader || "";
+  const matches =
+    actual.length === expected.length &&
+    crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+
+  if (!matches) {
+    console.error("Fluid webhook signature validation failed", {
+      expected,
+      received: actual,
+    });
+  }
+
+  return matches;
+}
+```
+
+### Verify in Python
+
+```python
+import hmac
+from hashlib import sha256
+
+
+def verify_fluid_webhook(raw_body: bytes, signature_header: str | None, secret: str) -> bool:
+    expected = "sha256=" + hmac.new(
+        secret.encode("utf-8"),
+        raw_body,
+        sha256,
+    ).hexdigest()
+    actual = signature_header or ""
+    matches = hmac.compare_digest(actual, expected)
+
+    if not matches:
+        print(
+            "Fluid webhook signature validation failed",
+            {"expected": expected, "received": actual},
+        )
+
+    return matches
+```
+
+## Slack Alerts
+
+Critical alerts are posted to Slack as Block Kit messages with a severity emoji, ISO timestamp, and event detail. The server currently emits Slack alerts for:
+
+- low fee-payer balance
+- 5xx request failures
+- server lifecycle events (start and stop)
+- failed transactions observed by the ledger monitor
+
+Each Slack event type can be toggled independently with the `SLACK_ALERT_*_ENABLED` environment variables.
 
 ### POST /fee-bump
 

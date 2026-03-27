@@ -1,46 +1,73 @@
-import { createLogger, serializeError } from "./utils/logger";
+import "dotenv/config";
+
+import cors from "cors";
 import express, { NextFunction, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
-import redisClient from "./utils/redis";
-import { RedisRateLimitStore } from "./utils/redisRateLimitStore";
-import cors from "cors";
-import dotenv from "dotenv";
-
-import { loadConfig } from "./config";
-import { AppError } from "./errors/AppError";
-import { feeBumpHandler } from "./handlers/feeBump";
+import {
+  listApiKeysHandler,
+  revokeApiKeyHandler,
+  upsertApiKeyHandler,
+} from "./handlers/adminApiKeys";
+import {
+  listWebhookSettingsHandler,
+  updateWebhookSettingsHandler,
+} from "./handlers/adminWebhooks";
+import {
+  addSignerHandler,
+  listSignersHandler,
+  removeSignerHandler,
+} from "./handlers/adminSigners";
+import { feeBumpBatchHandler, feeBumpHandler } from "./handlers/feeBump";
+import {
+  createCheckoutSessionHandler,
+  stripeWebhookHandler,
+} from "./handlers/stripe";
+import {
+  getWebhookSettingsHandler,
+  updateWebhookHandler,
+} from "./handlers/tenantWebhook";
 import {
   getHorizonFailoverClient,
   initializeHorizonFailoverClient,
 } from "./horizon/failoverClient";
+import { AppError } from "./errors/AppError";
 import { apiKeyMiddleware } from "./middleware/apiKeys";
 import {
-  listApiKeysHandler,
-  upsertApiKeyHandler,
-  revokeApiKeyHandler,
-} from "./handlers/adminApiKeys";
-import { globalErrorHandler, notFoundHandler } from "./middleware/errorHandler";
+  createGlobalErrorHandler,
+  notFoundHandler,
+} from "./middleware/errorHandler";
 import { apiKeyRateLimit } from "./middleware/rateLimit";
 import { AlertService } from "./services/alertService";
+import {
+  hydratePersistedSigners,
+  listAdminSigners,
+} from "./services/signerRegistry";
+import {
+  loadSlackNotifierOptionsFromEnv,
+  SlackNotifier,
+} from "./services/slackNotifier";
 import { PagerDutyNotifier } from "./services/pagerDutyNotifier";
+import { createLogger, serializeError } from "./utils/logger";
+import redisClient from "./utils/redis";
+import { RedisRateLimitStore } from "./utils/redisRateLimitStore";
+import { loadConfig } from "./config";
 import { initializeBalanceMonitor } from "./workers/balanceMonitor";
-import { initializeLedgerMonitor } from "./workers/ledgerMonitor";
-import { initializeIncidentMonitor } from "./workers/incidentMonitor";
-import { transactionStore } from "./workers/transactionStore";
 import {
   getLedgerMonitor,
   initializeLedgerMonitor,
 } from "./workers/ledgerMonitor";
+import { initializeIncidentMonitor } from "./workers/incidentMonitor";
+import { transactionStore } from "./workers/transactionStore";
+import { healthHandler } from "./handlers/health";
 
 const logger = createLogger({ component: "server" });
-
-dotenv.config();
 
 const app = express();
 app.use(express.json());
 
 const config = loadConfig();
 const alertService = new AlertService(config.alerting);
+const slackNotifier = new SlackNotifier(loadSlackNotifierOptionsFromEnv());
 const pagerDutyNotifier = new PagerDutyNotifier();
 
 // Use Redis-backed store for global IP rate limiting. Falls back to memory store if Redis unavailable.
@@ -189,35 +216,73 @@ app.post(
   },
 );
 
-// 404 - must come after all routes
-// Admin API keys management (minimal — secure these endpoints in production)
 app.get("/admin/api-keys", listApiKeysHandler);
 app.post("/admin/api-keys", upsertApiKeyHandler);
+app.patch("/admin/api-keys/:key/revoke", revokeApiKeyHandler);
 app.delete("/admin/api-keys/:key", revokeApiKeyHandler);
+app.get("/admin/webhooks", listWebhookSettingsHandler);
+app.patch("/admin/webhooks/:tenantId", updateWebhookSettingsHandler);
+app.get("/admin/signers", listSignersHandler(config));
+app.post("/admin/signers", addSignerHandler(config));
+app.delete("/admin/signers/:publicKey", removeSignerHandler(config));
+
+app.post(
+  "/stripe/webhook",
+  express.raw({ type: "application/json" }),
+  stripeWebhookHandler,
+);
+app.post("/create-checkout-session", createCheckoutSessionHandler);
 
 app.use(notFoundHandler);
-app.use(globalErrorHandler);
+app.use(createGlobalErrorHandler(slackNotifier));
 
 const PORT = process.env.PORT || 3000;
 
 let ledgerMonitor: ReturnType<typeof initializeLedgerMonitor> | null = null;
+let balanceMonitor: ReturnType<typeof initializeBalanceMonitor> | null = null;
 let incidentMonitor: ReturnType<typeof initializeIncidentMonitor> | null = null;
+let shuttingDown = false;
+let server: ReturnType<typeof app.listen> | null = null;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
+  await slackNotifier.notifyServerLifecycle({
+    detail: `Signal received: ${signal}`,
+    phase: "stop",
+    timestamp: new Date(),
+  });
+
+  ledgerMonitor?.stop();
+  balanceMonitor?.stop();
+  incidentMonitor?.stop();
+
+  if (server) {
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2_000).unref();
+    return;
+  }
+
+  process.exit(0);
+}
+
+// --- Background Workers ---
+let ledgerMonitorInstance: any = null;
 if (config.horizonUrls.length > 0) {
   try {
-    ledgerMonitor = initializeLedgerMonitor(config);
-    ledgerMonitor.start();
+    ledgerMonitorInstance = initializeLedgerMonitor(config);
+    ledgerMonitorInstance.start();
     logger.info("Ledger monitor worker started");
   } catch (error) {
-    logger.error(
-      { ...serializeError(error) },
-      "Failed to start ledger monitor",
-    );
+    logger.error({ ...serializeError(error) }, "Failed to start ledger monitor");
   }
 } else {
   logger.info("No Horizon URLs configured; ledger monitor disabled");
 }
 
-let balanceMonitor: any = null;
 if (
   config.horizonUrl &&
   config.alerting.lowBalanceThresholdXlm !== undefined &&
@@ -226,12 +291,12 @@ if (
   try {
     balanceMonitor = initializeBalanceMonitor(config, alertService);
     balanceMonitor.start();
-    console.log("Balance monitor worker started");
+    logger.info("Balance monitor worker started");
   } catch (error) {
-    console.error("Failed to start balance monitor:", error);
+    logger.error({ ...serializeError(error) }, "Failed to start balance monitor");
   }
 } else {
-  console.log(
+  logger.info(
     "Low balance alerting disabled - missing Horizon URL, threshold, or alert transport",
   );
 }
@@ -248,7 +313,7 @@ if (pagerDutyNotifier.isConfigured()) {
   logger.info("PagerDuty incident alerting disabled - routing key not set");
 }
 
-app.listen(PORT, () => {
+server = app.listen(PORT, () => {
   logger.info(
     {
       fee_payers_loaded: config.feePayerAccounts.length,
