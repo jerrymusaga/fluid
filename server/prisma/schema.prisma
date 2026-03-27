@@ -17,6 +17,7 @@ model Tenant {
   webhookUrl         String?
   apiKeys            ApiKey[]
   webhookDeliveries  WebhookDelivery[]
+  quotaTopUps QuotaTopUp[]
   payments           Payment[]
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
@@ -42,7 +43,7 @@ model WebhookDelivery {
   tenantId    String
   tenant      Tenant   @relation(fields: [tenantId], references: [id])
   url         String
-  payload     Json
+  payload     String
   status      String   @default("pending") // pending, success, failed
   retryCount  Int      @default(0)
   lastError   String?
@@ -54,28 +55,45 @@ model WebhookDelivery {
   @@index([tenantId])
 }
 
-model Payment {
-  id                String   @id @default(uuid())
-  tenantId          String
-  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  stripeSessionId   String   @unique
-  stripePaymentId   String?  @unique
-  amountCents       Int
-  creditStroops     BigInt
-  status            String   @default("pending") // pending, completed, failed
-  metadata          Json?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+model QuotaTopUp {
+  id              String   @id @default(uuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  stripeSessionId String   @unique
+  amountCents     Int
+  quotaStroops    BigInt
+  status          String   @default("pending") // pending, fulfilled, failed
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([tenantId])
-  @@index([stripeSessionId])
+  @@index([status])
+}
+
+model SupportedAsset {
+  id         String   @id @default(uuid())
+  code       String
+  issuer     String?
+  minBalance String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([code, issuer])
 }
 
 model SponsoredTransaction {
   id         String   @id @default(uuid())
   tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id])
   feeStroops BigInt
   createdAt  DateTime @default(now())
-
-  @@index([tenantId, createdAt])
+}
+model SignerSecret {
+  id                String   @id @default(uuid())
+  publicKey         String   @unique
+  encryptedSecret   String
+  initializationVec String
+  authTag           String
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 }
